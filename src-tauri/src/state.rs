@@ -97,6 +97,43 @@ struct AnalyzerOutput {
     preview_text: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    pub key: String,
+    pub name: String,
+    pub repo: String,
+    pub downloaded: bool,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStatus {
+    pub ready: bool,
+    pub models_dir: String,
+    pub models: Vec<ModelInfo>,
+}
+
+struct RequiredModel {
+    key: &'static str,
+    name: &'static str,
+    repo: &'static str,
+}
+
+const REQUIRED_MODELS: &[RequiredModel] = &[
+    RequiredModel {
+        key: "gliclass",
+        name: "GLiClass classifier",
+        repo: "knowledgator/gliclass-small-v1.0",
+    },
+    RequiredModel {
+        key: "qwen",
+        name: "Qwen small language model",
+        repo: "Qwen/Qwen2.5-0.5B-Instruct",
+    },
+];
+
 impl AppState {
     pub fn new(app: &AppHandle) -> Result<Self, FileSiftError> {
         let data_dir = app.path().app_data_dir()?;
@@ -240,13 +277,18 @@ pub fn analyze_batch_impl(app: &AppHandle, batch_id: &str) -> Result<Vec<FileRec
     let _guard = app_state.lock.lock().expect("app state lock poisoned");
     let conn = app_state.connection()?;
     let settings = get_settings_from_conn(&conn)?;
+    if !model_status(app)?.ready {
+        return Err(FileSiftError::Validation(
+            "Download the local models before analyzing documents.".to_string(),
+        ));
+    }
     let mut files = list_files(&conn, Some(batch_id))?;
     let analyzer = analyzer_script_path(app);
 
     for file in &mut files {
         file.status = "Extracting".to_string();
         upsert_file(&conn, file)?;
-        match run_analyzer(&analyzer, file, &settings) {
+        match run_analyzer(app, &analyzer, file, &settings) {
             Ok(output) => {
                 file.status = if output.confidence >= settings.approve_threshold {
                     "Ready".to_string()
@@ -426,6 +468,29 @@ pub fn save_settings_impl(app: &AppHandle, settings: NamingSettings) -> Result<N
     Ok(settings)
 }
 
+pub fn get_model_status_impl(app: &AppHandle) -> Result<ModelStatus, FileSiftError> {
+    model_status(app)
+}
+
+pub fn download_required_models_impl(app: &AppHandle) -> Result<ModelStatus, FileSiftError> {
+    let script = models_script_path(app);
+    if !script.exists() {
+        return Err(FileSiftError::Validation("Python model downloader script not found.".to_string()));
+    }
+    let models_dir = models_dir(app)?;
+    fs::create_dir_all(&models_dir)?;
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--models-dir")
+        .arg(&models_dir)
+        .arg("--download")
+        .output()?;
+    if !output.status.success() {
+        return Err(FileSiftError::Validation(String::from_utf8_lossy(&output.stderr).to_string()));
+    }
+    model_status(app)
+}
+
 fn expand_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, FileSiftError> {
     let mut seen = HashSet::new();
     let mut files = Vec::new();
@@ -468,14 +533,57 @@ fn analyzer_script_path(app: &AppHandle) -> PathBuf {
     if dev_path.exists() {
         return dev_path;
     }
-    app.path()
-        .resource_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("python")
-        .join("analyzer.py")
+    resource_script_path(app, "analyzer.py")
 }
 
-fn run_analyzer(path: &Path, file: &FileRecord, settings: &NamingSettings) -> Result<AnalyzerOutput, FileSiftError> {
+fn models_script_path(app: &AppHandle) -> PathBuf {
+    let dev_path = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("python")
+        .join("models.py");
+    if dev_path.exists() {
+        return dev_path;
+    }
+    resource_script_path(app, "models.py")
+}
+
+fn resource_script_path(app: &AppHandle, file_name: &str) -> PathBuf {
+    let resource_dir = app.path().resource_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let nested = resource_dir.join("python").join(file_name);
+    if nested.exists() {
+        return nested;
+    }
+    resource_dir.join(file_name)
+}
+
+fn models_dir(app: &AppHandle) -> Result<PathBuf, FileSiftError> {
+    Ok(app.path().app_data_dir()?.join("models"))
+}
+
+fn model_status(app: &AppHandle) -> Result<ModelStatus, FileSiftError> {
+    let models_dir = models_dir(app)?;
+    let models = REQUIRED_MODELS
+        .iter()
+        .map(|model| {
+            let path = models_dir.join(model.key);
+            let downloaded = path.join(".filesift-model-ready").exists();
+            ModelInfo {
+                key: model.key.to_string(),
+                name: model.name.to_string(),
+                repo: model.repo.to_string(),
+                downloaded,
+                path: path.to_string_lossy().to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(ModelStatus {
+        ready: models.iter().all(|model| model.downloaded),
+        models_dir: models_dir.to_string_lossy().to_string(),
+        models,
+    })
+}
+
+fn run_analyzer(app: &AppHandle, path: &Path, file: &FileRecord, settings: &NamingSettings) -> Result<AnalyzerOutput, FileSiftError> {
     if !path.exists() {
         return Err(FileSiftError::Validation("Python analyzer script not found.".to_string()));
     }
@@ -485,6 +593,7 @@ fn run_analyzer(path: &Path, file: &FileRecord, settings: &NamingSettings) -> Re
         .arg(&file.path)
         .arg("--settings")
         .arg(serde_json::to_string(settings)?)
+        .env("FILESIFT_MODELS_DIR", models_dir(app)?)
         .output()?;
     if !output.status.success() {
         return Err(FileSiftError::Validation(String::from_utf8_lossy(&output.stderr).to_string()));

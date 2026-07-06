@@ -51,6 +51,20 @@ export type NamingSettings = {
   documentLabels: string[];
 };
 
+export type ModelInfo = {
+  key: "gliclass" | "qwen";
+  name: string;
+  repo: string;
+  downloaded: boolean;
+  path: string;
+};
+
+export type ModelStatus = {
+  ready: boolean;
+  modelsDir: string;
+  models: ModelInfo[];
+};
+
 export type UpdateStatus =
   | { kind: "idle" }
   | { kind: "checking" }

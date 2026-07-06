@@ -1,5 +1,6 @@
 pydantic>=2.10
 python-dateutil>=2.9
+huggingface-hub>=0.24
 
 # Optional but intended for the full local AI pipeline:
 # docling>=2

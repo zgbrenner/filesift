@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
-import type { BatchRecord, FileRecord, NamingSettings } from "./types";
+import type { BatchRecord, FileRecord, ModelStatus, NamingSettings } from "./types";
 
 const isTauri = "__TAURI_INTERNALS__" in window;
 
@@ -38,7 +38,7 @@ export const defaultSettings: NamingSettings = {
   separator: "space",
   maxFilenameLength: 120,
   approveThreshold: 0.82,
-  modelMode: "heuristic",
+  modelMode: "local-model",
   documentLabels: defaultLabels,
 };
 
@@ -68,19 +68,19 @@ const demoFiles: FileRecord[] = [
     batchId: "demo",
     path: "/Users/example/Documents/document-final-final.pdf",
     originalName: "document-final-final.pdf",
-    suggestedName: "2023-11-02 Acme Inc Vendor Services Agreement.pdf",
+    suggestedName: "2023-11-02 Halberg Systems Inc Vendor Services Agreement.pdf",
     extension: ".pdf",
     status: "Needs review",
     approval: "pending",
     documentType: "Vendor Agreement",
     detectedDate: "2023-11-02",
-    detectedEntity: "Acme Inc",
+    detectedEntity: "Halberg Systems Inc",
     detectedLanguage: "English",
     confidence: 0.74,
     evidence: ["services agreement", "vendor", "effective date"],
     warnings: ["Entity appears in several places; review suggested name before approving."],
     previewText:
-      "This Vendor Services Agreement is entered into as of November 2, 2023 by and between Acme Inc and the supplier.",
+      "This Vendor Services Agreement is entered into as of November 2, 2023 by and between Halberg Systems Inc and the supplier.",
     error: null,
   },
 ];
@@ -167,6 +167,37 @@ export async function getSettings(): Promise<NamingSettings> {
 export async function saveSettings(settings: NamingSettings): Promise<NamingSettings> {
   if (!isTauri) return settings;
   return invoke("save_settings", { settings });
+}
+
+export async function getModelStatus(): Promise<ModelStatus> {
+  if (!isTauri) {
+    return {
+      ready: true,
+      modelsDir: "browser-demo",
+      models: [
+        {
+          key: "gliclass",
+          name: "GLiClass classifier",
+          repo: "knowledgator/gliclass-small-v1.0",
+          downloaded: true,
+          path: "browser-demo/gliclass",
+        },
+        {
+          key: "qwen",
+          name: "Qwen small language model",
+          repo: "Qwen/Qwen2.5-0.5B-Instruct",
+          downloaded: true,
+          path: "browser-demo/qwen",
+        },
+      ],
+    };
+  }
+  return invoke("get_model_status");
+}
+
+export async function downloadRequiredModels(): Promise<ModelStatus> {
+  if (!isTauri) return getModelStatus();
+  return invoke("download_required_models");
 }
 
 export async function checkForUpdate(): Promise<{ version: string; notes: string } | null> {

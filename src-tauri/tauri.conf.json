@@ -33,7 +33,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["../python/analyzer.py"],
+    "resources": ["../python/analyzer.py", "../python/models.py"],
     "createUpdaterArtifacts": true
   },
   "plugins": {

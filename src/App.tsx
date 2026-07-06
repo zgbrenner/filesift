@@ -11,7 +11,6 @@ import {
   Files,
   RotateCcw,
   Search,
-  Settings,
   ShieldCheck,
   SkipForward,
   Sparkles,
@@ -24,19 +23,20 @@ import {
   checkForUpdate,
   createBatch,
   defaultSettings,
+  downloadRequiredModels,
   getHistory,
+  getModelStatus,
   getSettings,
   installUpdate,
   pickImportFolder,
   pickImportPaths,
-  saveSettings,
   saveSuggestion,
   setApproval,
   undoLastBatch,
 } from "./tauri";
-import type { BatchRecord, FileRecord, NamingSettings, UpdateStatus } from "./types";
+import type { BatchRecord, FileRecord, ModelStatus, NamingSettings, UpdateStatus } from "./types";
 
-type View = "review" | "settings" | "history";
+type View = "review" | "history";
 
 const confidenceLabel = (confidence: number) => {
   if (confidence >= 0.82) return "High";
@@ -59,8 +59,10 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settings, setNamingSettings] = useState<NamingSettings>(defaultSettings);
   const [history, setHistory] = useState<BatchRecord[]>([]);
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
+  const [modelsBusy, setModelsBusy] = useState(false);
   const [filter, setFilter] = useState("");
   const [notice, setNotice] = useState<{ tone: "good" | "warn" | "bad" | "info"; message: string } | null>(null);
 
@@ -89,10 +91,37 @@ export function App() {
   useEffect(() => {
     void getSettings().then(setNamingSettings).catch(() => setNamingSettings(defaultSettings));
     void getHistory().then(setHistory).catch(() => setHistory([]));
+    void refreshModelStatus();
   }, []);
+
+  async function refreshModelStatus() {
+    try {
+      setModelStatus(await getModelStatus());
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Could not read model status." });
+    }
+  }
+
+  async function downloadModels() {
+    setNotice(null);
+    setModelsBusy(true);
+    try {
+      const status = await downloadRequiredModels();
+      setModelStatus(status);
+      setNotice({ tone: status.ready ? "good" : "warn", message: status.ready ? "Models are ready for local analysis." : "Some models still need to download." });
+    } catch (error) {
+      setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Model download failed." });
+    } finally {
+      setModelsBusy(false);
+    }
+  }
 
   async function importPaths(paths?: string[]) {
     setNotice(null);
+    if (!modelStatus?.ready) {
+      setNotice({ tone: "warn", message: "Download the local models before adding documents." });
+      return;
+    }
     setBusy(true);
     try {
       const selectedPaths = paths ?? (await pickImportPaths());
@@ -177,7 +206,7 @@ export function App() {
 
   return (
     <main
-      className="app"
+      className={`app${busy ? " is-busy" : ""}`}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault();
@@ -198,32 +227,29 @@ export function App() {
         <button className={view === "review" ? "nav active" : "nav"} onClick={() => setView("review")}>
           <Sparkles size={18} /> Review
         </button>
-        <button className={view === "settings" ? "nav active" : "nav"} onClick={() => setView("settings")}>
-          <Settings size={18} /> Settings
-        </button>
         <button className={view === "history" ? "nav active" : "nav"} onClick={() => setView("history")}>
           <History size={18} /> History
         </button>
         <div className="privacy">
           <ShieldCheck size={18} />
-          <span>Local-first. No cloud upload by default.</span>
+          <span>Models and documents stay on this computer after setup.</span>
         </div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
           <div>
-            <h1>{view === "review" ? "Review filenames" : view === "settings" ? "Settings" : "Rename history"}</h1>
-            <p>{batch ? `${batch.fileCount} files in ${batch.name}` : "Drop files or folders to begin a rename batch."}</p>
+            <h1>{view === "review" ? "Review filenames" : "Rename history"}</h1>
+            <p>{batch ? `${batch.fileCount} files in ${batch.name}` : "Download the models once, then add documents for local review."}</p>
           </div>
           <div className="top-actions">
             <button className="secondary" onClick={checkUpdates}>
               <Download size={17} /> Check updates
             </button>
-            <button className="primary" onClick={() => void importPaths()} disabled={busy}>
+            <button className="primary" onClick={() => void importPaths()} disabled={busy || !modelStatus?.ready}>
               <Files size={17} /> Add files
             </button>
-            <button className="primary" onClick={() => void importFolder()} disabled={busy}>
+            <button className="primary" onClick={() => void importFolder()} disabled={busy || !modelStatus?.ready}>
               <FolderOpen size={17} /> Add folder
             </button>
           </div>
@@ -231,7 +257,7 @@ export function App() {
 
         <UpdateBanner status={updateStatus} onInstall={installAvailableUpdate} />
         {notice && (
-          <div className={`banner ${notice.tone}`}>
+          <div className={`banner ${notice.tone}`} role="status" aria-live="polite">
             {notice.tone === "bad" ? <AlertCircle size={17} /> : <Info size={17} />}
             <span>{notice.message}</span>
             <button onClick={() => setNotice(null)}>Dismiss</button>
@@ -239,28 +265,46 @@ export function App() {
         )}
 
         {view === "review" && (
-          <div className="review-layout">
-            <section className="main-panel">
+          <>
+            <ModelSetup status={modelStatus} busy={modelsBusy} onDownload={downloadModels} />
+            <div className="review-layout">
+              <section className="main-panel">
               {files.length === 0 ? (
-                <div className="dropzone" onClick={() => void importPaths()}>
-                  <Upload size={42} />
-                  <h2>Drop documents or folders here</h2>
-                  <p>Files appear immediately, then FileSift extracts, classifies, and proposes safe names for review.</p>
-                  <div className="drop-actions">
-                    <button className="secondary" onClick={(event) => {
-                      event.stopPropagation();
-                      void importPaths();
-                    }}>
-                      <Files size={16} /> Choose files
-                    </button>
-                    <button className="secondary" onClick={(event) => {
-                      event.stopPropagation();
-                      void importFolder();
-                    }}>
-                      <FolderOpen size={16} /> Choose folder
-                    </button>
+                busy ? (
+                  <div className="dropzone loading-state" aria-live="polite">
+                    <div className="skeleton-icon" />
+                    <div className="skeleton-line wide" />
+                    <div className="skeleton-line" />
+                    <div className="skeleton-actions">
+                      <div />
+                      <div />
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="dropzone" onClick={() => void importPaths()}>
+                    <Upload size={42} />
+                    <h2>{modelStatus?.ready ? "Drop documents or folders here" : "Download models to start"}</h2>
+                    <p>
+                      {modelStatus?.ready
+                        ? "FileSift extracts, classifies, and proposes safe names for review before anything is renamed."
+                        : "The GLiClass classifier and small Qwen model are required for local analysis."}
+                    </p>
+                    <div className="drop-actions">
+                      <button className="secondary" onClick={(event) => {
+                        event.stopPropagation();
+                        void importPaths();
+                      }} disabled={!modelStatus?.ready}>
+                        <Files size={16} /> Choose files
+                      </button>
+                      <button className="secondary" onClick={(event) => {
+                        event.stopPropagation();
+                        void importFolder();
+                      }} disabled={!modelStatus?.ready}>
+                        <FolderOpen size={16} /> Choose folder
+                      </button>
+                    </div>
+                  </div>
+                )
               ) : (
                 <>
                   <div className="summary-strip">
@@ -347,19 +391,10 @@ export function App() {
                   </div>
                 </>
               )}
-            </section>
-            <DetailPanel file={selectedFile} />
-          </div>
-        )}
-
-        {view === "settings" && (
-          <SettingsPanel
-            settings={settings}
-            onSave={async (next) => {
-              const saved = await saveSettings(next);
-              setNamingSettings(saved);
-            }}
-          />
+              </section>
+              <DetailPanel file={selectedFile} />
+            </div>
+          </>
         )}
 
         {view === "history" && (
@@ -378,6 +413,35 @@ export function App() {
         )}
       </section>
     </main>
+  );
+}
+
+function ModelSetup({ status, busy, onDownload }: { status: ModelStatus | null; busy: boolean; onDownload: () => void }) {
+  const ready = Boolean(status?.ready);
+  return (
+    <section className={`model-card ${ready ? "ready" : "missing"}`}>
+      <div>
+        <span className={`pill ${ready ? "good" : "warn"}`}>{ready ? "Models ready" : "Setup required"}</span>
+        <h2>Local AI models</h2>
+        <p>
+          FileSift uses GLiClass for document type detection and a small Qwen model for filename reasoning. Download them once before reviewing files.
+        </p>
+      </div>
+      <div className="model-list">
+        {(status?.models ?? []).map((model) => (
+          <div className="model-row" key={model.key}>
+            <div>
+              <strong>{model.name}</strong>
+              <span>{model.repo}</span>
+            </div>
+            <span className={`pill ${model.downloaded ? "good" : "muted"}`}>{model.downloaded ? "Ready" : "Missing"}</span>
+          </div>
+        ))}
+      </div>
+      <button className="primary" onClick={onDownload} disabled={busy || ready}>
+        <Download size={17} /> {busy ? "Downloading" : ready ? "Downloaded" : "Download models"}
+      </button>
+    </section>
   );
 }
 
@@ -439,82 +503,6 @@ function DetailPanel({ file }: { file: FileRecord | null }) {
         <p className="preview">{file.previewText || "No preview text available."}</p>
       </section>
     </aside>
-  );
-}
-
-function SettingsPanel({ settings, onSave }: { settings: NamingSettings; onSave: (settings: NamingSettings) => Promise<void> }) {
-  const [draft, setDraft] = useState(settings);
-  useEffect(() => setDraft(settings), [settings]);
-
-  return (
-    <section className="settings-grid">
-      <div className="settings-card">
-        <h2>Naming convention</h2>
-        <label>
-          Date format
-          <select value={draft.dateFormat} onChange={(event) => setDraft({ ...draft, dateFormat: event.target.value as NamingSettings["dateFormat"] })}>
-            <option>YYYY-MM-DD</option>
-            <option>YYYY.MM.DD</option>
-            <option>MM-DD-YYYY</option>
-          </select>
-        </label>
-        <label>
-          Missing date label
-          <input value={draft.missingDateLabel} onChange={(event) => setDraft({ ...draft, missingDateLabel: event.target.value })} />
-        </label>
-        <label>
-          Separator
-          <select value={draft.separator} onChange={(event) => setDraft({ ...draft, separator: event.target.value as NamingSettings["separator"] })}>
-            <option value="space">Space</option>
-            <option value="hyphen">Hyphen</option>
-            <option value="underscore">Underscore</option>
-          </select>
-        </label>
-        <label>
-          Maximum filename length
-          <input
-            type="number"
-            min={40}
-            max={220}
-            value={draft.maxFilenameLength}
-            onChange={(event) => setDraft({ ...draft, maxFilenameLength: Number(event.target.value) })}
-          />
-        </label>
-        <div className="toggles">
-          <label><input type="checkbox" checked={draft.includeEntity} onChange={(event) => setDraft({ ...draft, includeEntity: event.target.checked })} /> Include entity</label>
-          <label><input type="checkbox" checked={draft.includeDocumentType} onChange={(event) => setDraft({ ...draft, includeDocumentType: event.target.checked })} /> Include document type</label>
-        </div>
-      </div>
-      <div className="settings-card">
-        <h2>Document labels</h2>
-        <textarea
-          value={draft.documentLabels.join("\n")}
-          onChange={(event) => setDraft({ ...draft, documentLabels: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })}
-        />
-      </div>
-      <div className="settings-card">
-        <h2>Model and privacy</h2>
-        <label>
-          Analysis mode
-          <select value={draft.modelMode} onChange={(event) => setDraft({ ...draft, modelMode: event.target.value as NamingSettings["modelMode"] })}>
-            <option value="heuristic">Heuristic MVP</option>
-            <option value="local-model">Local model</option>
-          </select>
-        </label>
-        <label>
-          Auto-approve threshold
-          <input
-            type="number"
-            min={0.5}
-            max={0.99}
-            step={0.01}
-            value={draft.approveThreshold}
-            onChange={(event) => setDraft({ ...draft, approveThreshold: Number(event.target.value) })}
-          />
-        </label>
-        <button className="primary" onClick={() => void onSave(draft)}>Save settings</button>
-      </div>
-    </section>
   );
 }
 

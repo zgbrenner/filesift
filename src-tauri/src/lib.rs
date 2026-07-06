@@ -1,8 +1,9 @@
 mod state;
 
 use state::{
-    apply_renames_impl, create_batch_impl, get_history_impl, get_settings_impl, save_settings_impl,
-    save_suggestion_impl, set_approval_impl, undo_last_batch_impl, AppState, FileRecord, NamingSettings,
+    apply_renames_impl, create_batch_impl, download_required_models_impl, get_history_impl, get_model_status_impl,
+    get_settings_impl, save_settings_impl, save_suggestion_impl, set_approval_impl, undo_last_batch_impl, AppState,
+    FileRecord, ModelStatus, NamingSettings,
 };
 use tauri::Manager;
 
@@ -51,6 +52,16 @@ fn save_settings(app: tauri::AppHandle, settings: NamingSettings) -> Result<Nami
     save_settings_impl(&app, settings).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn get_model_status(app: tauri::AppHandle) -> Result<ModelStatus, String> {
+    get_model_status_impl(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn download_required_models(app: tauri::AppHandle) -> Result<ModelStatus, String> {
+    download_required_models_impl(&app).map_err(|error| error.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -72,7 +83,9 @@ pub fn run() {
             undo_last_batch,
             get_history,
             get_settings,
-            save_settings
+            save_settings,
+            get_model_status,
+            download_required_models
         ])
         .run(tauri::generate_context!())
         .expect("failed to run FileSift");
