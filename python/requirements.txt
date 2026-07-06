@@ -1,0 +1,8 @@
+pydantic>=2.10
+python-dateutil>=2.9
+
+# Optional but intended for the full local AI pipeline:
+# docling>=2
+# gliclass
+# transformers
+# torch
