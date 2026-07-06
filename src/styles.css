@@ -329,6 +329,13 @@ textarea:focus-visible {
   text-wrap: pretty;
 }
 
+.model-card .model-progress {
+  margin-top: 9px;
+  color: #3d5960;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .model-list {
   display: grid;
   gap: 8px;

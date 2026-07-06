@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -176,14 +177,118 @@ def classify(text: str, labels: list[str]) -> tuple[str, float, list[str]]:
     return "Unknown", 0.35, []
 
 
+def classify_with_gliclass(text: str, labels: list[str], models_dir: Path, warnings: list[str]) -> tuple[str, float, list[str]] | None:
+    if not text.strip() or not labels:
+        return None
+    model_path = models_dir / "gliclass"
+    if not (model_path / ".filesift-model-ready").exists():
+        return None
+    try:
+        from transformers import pipeline  # type: ignore
+
+        classifier = pipeline(
+            "zero-shot-classification",
+            model=str(model_path),
+            tokenizer=str(model_path),
+            trust_remote_code=True,
+            model_kwargs={"local_files_only": True},
+            tokenizer_kwargs={"local_files_only": True},
+        )
+        result = classifier(text[:6000], candidate_labels=[label for label in labels if label != "Unknown"], multi_label=False)
+        scored = list(zip(result.get("labels", []), result.get("scores", []), strict=False))
+        if not scored:
+            return None
+        label, score = scored[0]
+        confidence = max(0.35, min(float(score), 0.96))
+        return str(label), confidence, [f"GLiClass classified as {label}"]
+    except Exception as exc:  # noqa: BLE001 - model fallback is intentional
+        warnings.append(f"GLiClass unavailable or failed: {exc}")
+        return None
+
+
+def enrich_with_qwen(text: str, analysis: dict[str, Any], labels: list[str], models_dir: Path, warnings: list[str]) -> dict[str, Any]:
+    if not text.strip():
+        return analysis
+    model_path = models_dir / "qwen"
+    if not (model_path / ".filesift-model-ready").exists():
+        return analysis
+    try:
+        import torch  # type: ignore
+        from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
+
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            str(model_path),
+            local_files_only=True,
+            trust_remote_code=True,
+            torch_dtype=torch.float32,
+        )
+        labels_text = ", ".join(label for label in labels if label != "Unknown")
+        prompt = (
+            "Read this document text and return only compact JSON with keys "
+            "documentType, detectedDate, detectedEntity, detectedLanguage. "
+            f"Use one documentType from this list when possible: {labels_text}. "
+            "Use null when unknown. Text:\n"
+            f"{text[:4500]}"
+        )
+        messages = [
+            {"role": "system", "content": "You extract conservative document metadata for local file renaming."},
+            {"role": "user", "content": prompt},
+        ]
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_tensors="pt",
+            return_dict=True,
+        )
+        with torch.no_grad():
+            output = model.generate(**encoded, max_new_tokens=120, do_sample=False)
+        decoded = tokenizer.decode(output[0][encoded["input_ids"].shape[-1] :], skip_special_tokens=True)
+        match = re.search(r"\{.*\}", decoded, re.DOTALL)
+        if not match:
+            return analysis
+        parsed = json.loads(match.group(0))
+        for key in ["documentType", "detectedDate", "detectedEntity", "detectedLanguage"]:
+            value = parsed.get(key)
+            if value and (not analysis.get(key) or analysis.get(key) == "Unknown"):
+                analysis[key] = str(value)
+        evidence = analysis.setdefault("evidence", [])
+        evidence.append("Qwen reviewed extracted text")
+        return analysis
+    except Exception as exc:  # noqa: BLE001 - model fallback is intentional
+        warnings.append(f"Qwen unavailable or failed: {exc}")
+        return analysis
+
+
 def analyze(path: Path, settings: dict[str, Any]) -> Analysis:
     text, warnings = extract_text(path)
     preview = " ".join(text.split())[:1200]
     labels = settings.get("documentLabels") or []
     document_type, confidence, evidence = classify(text, labels)
+    if settings.get("modelMode") == "local-model":
+        models_dir = Path(os.environ.get("FILESIFT_MODELS_DIR", ""))
+        model_classification = classify_with_gliclass(text, labels, models_dir, warnings)
+        if model_classification:
+            document_type, confidence, evidence = model_classification
     date = detect_date(text)
     entity = detect_entity(text)
     language = detect_language(text)
+
+    model_analysis = {
+        "documentType": document_type,
+        "detectedDate": date,
+        "detectedEntity": entity,
+        "detectedLanguage": language,
+        "evidence": evidence,
+    }
+    if settings.get("modelMode") == "local-model":
+        model_analysis = enrich_with_qwen(text, model_analysis, labels, Path(os.environ.get("FILESIFT_MODELS_DIR", "")), warnings)
+        document_type = model_analysis.get("documentType") or document_type
+        date = model_analysis.get("detectedDate") or date
+        entity = model_analysis.get("detectedEntity") or entity
+        language = model_analysis.get("detectedLanguage") or language
+        evidence = model_analysis.get("evidence") or evidence
 
     if not date:
         warnings.append("No reliable date found.")

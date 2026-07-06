@@ -33,7 +33,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["../python/analyzer.py", "../python/models.py"],
+    "resources": ["../python/analyzer.py", "../python/models.py", "../python/cli.py"],
+    "externalBin": ["binaries/filesift-sidecar"],
     "createUpdaterArtifacts": true
   },
   "plugins": {

@@ -16,6 +16,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useState } from "react";
 import {
   analyzeBatch,
@@ -34,7 +35,7 @@ import {
   setApproval,
   undoLastBatch,
 } from "./tauri";
-import type { BatchRecord, FileRecord, ModelStatus, NamingSettings, UpdateStatus } from "./types";
+import type { BatchRecord, FileRecord, ModelDownloadEvent, ModelStatus, NamingSettings, UpdateStatus } from "./types";
 
 type View = "review" | "history";
 
@@ -63,6 +64,7 @@ export function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
   const [modelsBusy, setModelsBusy] = useState(false);
+  const [modelProgress, setModelProgress] = useState("Models download from Hugging Face and run locally after setup.");
   const [filter, setFilter] = useState("");
   const [notice, setNotice] = useState<{ tone: "good" | "warn" | "bad" | "info"; message: string } | null>(null);
 
@@ -94,6 +96,25 @@ export function App() {
     void refreshModelStatus();
   }, []);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<ModelDownloadEvent>("model-download", (event) => {
+      const payload = event.payload;
+      if (payload.event === "model-start") {
+        setModelProgress(`Downloading ${payload.name ?? payload.key ?? "model"}...`);
+      } else if (payload.event === "model-complete") {
+        setModelProgress(`${payload.name ?? payload.key ?? "Model"} downloaded.`);
+      } else if (payload.event === "error") {
+        setModelProgress(payload.message ?? "Model download failed.");
+      }
+    }).then((cleanup) => {
+      unlisten = cleanup;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   async function refreshModelStatus() {
     try {
       setModelStatus(await getModelStatus());
@@ -105,9 +126,11 @@ export function App() {
   async function downloadModels() {
     setNotice(null);
     setModelsBusy(true);
+    setModelProgress("Starting model download...");
     try {
       const status = await downloadRequiredModels();
       setModelStatus(status);
+      setModelProgress(status.ready ? "All required models are ready." : "Some models still need to download.");
       setNotice({ tone: status.ready ? "good" : "warn", message: status.ready ? "Models are ready for local analysis." : "Some models still need to download." });
     } catch (error) {
       setNotice({ tone: "bad", message: error instanceof Error ? error.message : "Model download failed." });
@@ -266,7 +289,7 @@ export function App() {
 
         {view === "review" && (
           <>
-            <ModelSetup status={modelStatus} busy={modelsBusy} onDownload={downloadModels} />
+            <ModelSetup status={modelStatus} busy={modelsBusy} progress={modelProgress} onDownload={downloadModels} />
             <div className="review-layout">
               <section className="main-panel">
               {files.length === 0 ? (
@@ -416,7 +439,7 @@ export function App() {
   );
 }
 
-function ModelSetup({ status, busy, onDownload }: { status: ModelStatus | null; busy: boolean; onDownload: () => void }) {
+function ModelSetup({ status, busy, progress, onDownload }: { status: ModelStatus | null; busy: boolean; progress: string; onDownload: () => void }) {
   const ready = Boolean(status?.ready);
   return (
     <section className={`model-card ${ready ? "ready" : "missing"}`}>
@@ -426,6 +449,7 @@ function ModelSetup({ status, busy, onDownload }: { status: ModelStatus | null; 
         <p>
           FileSift uses GLiClass for document type detection and a small Qwen model for filename reasoning. Download them once before reviewing files.
         </p>
+        <p className="model-progress">{progress}</p>
       </div>
       <div className="model-list">
         {(status?.models ?? []).map((model) => (
@@ -433,6 +457,7 @@ function ModelSetup({ status, busy, onDownload }: { status: ModelStatus | null; 
             <div>
               <strong>{model.name}</strong>
               <span>{model.repo}</span>
+              <span>{model.size} download, {model.license} license</span>
             </div>
             <span className={`pill ${model.downloaded ? "good" : "muted"}`}>{model.downloaded ? "Ready" : "Missing"}</span>
           </div>

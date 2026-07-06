@@ -1,0 +1,8 @@
+Invoice
+
+Invoice number INV-1847
+Date: 2024-05-14
+
+Bill to: Halberg Systems Inc
+Amount due: 1847.25 USD
+Payment terms: Net 30

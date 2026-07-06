@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and smoke-test without publishing a GitHub release"
+        required: true
+        default: true
+        type: boolean
 
 jobs:
   publish-tauri:
@@ -21,12 +27,33 @@ jobs:
           node-version: 24
           cache: npm
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install Python sidecar dependencies
+        run: python -m pip install -r python/requirements.txt
+
+      - name: Verify pinned model sources
+        run: python python/models.py --models-dir "$env:RUNNER_TEMP\filesift-model-smoke" --verify-remote
+
+      - name: Build Python sidecar
+        shell: pwsh
+        run: |
+          python -m PyInstaller --onefile --name filesift-sidecar --collect-all transformers --collect-all torch --collect-all docling --collect-all huggingface_hub python/cli.py
+          New-Item -ItemType Directory -Force src-tauri/binaries
+          Copy-Item dist/filesift-sidecar.exe src-tauri/binaries/filesift-sidecar-x86_64-pc-windows-msvc.exe -Force
+          src-tauri/binaries/filesift-sidecar-x86_64-pc-windows-msvc.exe models --models-dir "$env:RUNNER_TEMP\filesift-model-smoke"
+
       - name: Validate updater signing secrets
+        if: github.event_name == 'push' || inputs.dry_run == false
         shell: bash
         run: |
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
@@ -42,6 +69,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build and publish Tauri release
+        if: github.event_name == 'push' || inputs.dry_run == false
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,3 +81,8 @@ jobs:
           releaseBody: "See the attached installers and update manifest."
           releaseDraft: false
           prerelease: false
+
+      - name: Dry run complete
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          echo "Dry-run completed: Python sidecar dependencies installed, model sources verified, and PyInstaller sidecar smoke-tested."

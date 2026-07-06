@@ -55,6 +55,9 @@ export type ModelInfo = {
   key: "gliclass" | "qwen";
   name: string;
   repo: string;
+  revision: string;
+  license: string;
+  size: string;
   downloaded: boolean;
   path: string;
 };
@@ -63,6 +66,14 @@ export type ModelStatus = {
   ready: boolean;
   modelsDir: string;
   models: ModelInfo[];
+};
+
+export type ModelDownloadEvent = {
+  event: string;
+  key: string | null;
+  name: string | null;
+  repo: string | null;
+  message: string | null;
 };
 
 export type UpdateStatus =

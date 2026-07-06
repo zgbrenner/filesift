@@ -1,9 +1,10 @@
 pydantic>=2.10
 python-dateutil>=2.9
 huggingface-hub>=0.24
+transformers>=4.43
+torch>=2.3
+docling>=2
+pyinstaller>=6.10
 
-# Optional but intended for the full local AI pipeline:
-# docling>=2
+# Optional for future model-specific integrations:
 # gliclass
-# transformers
-# torch

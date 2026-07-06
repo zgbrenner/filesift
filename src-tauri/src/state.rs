@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::Mutex,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -103,6 +104,9 @@ pub struct ModelInfo {
     pub key: String,
     pub name: String,
     pub repo: String,
+    pub revision: String,
+    pub license: String,
+    pub size: String,
     pub downloaded: bool,
     pub path: String,
 }
@@ -119,6 +123,9 @@ struct RequiredModel {
     key: &'static str,
     name: &'static str,
     repo: &'static str,
+    revision: &'static str,
+    license: &'static str,
+    size: &'static str,
 }
 
 const REQUIRED_MODELS: &[RequiredModel] = &[
@@ -126,13 +133,29 @@ const REQUIRED_MODELS: &[RequiredModel] = &[
         key: "gliclass",
         name: "GLiClass classifier",
         repo: "knowledgator/gliclass-small-v1.0",
+        revision: "21edefaf7951f68c68c505f9139ba536d3b448f7",
+        license: "apache-2.0",
+        size: "about 1.24 GiB",
     },
     RequiredModel {
         key: "qwen",
         name: "Qwen small language model",
         repo: "Qwen/Qwen2.5-0.5B-Instruct",
+        revision: "7ae557604adf67be50417f59c2c2f167def9a775",
+        license: "apache-2.0",
+        size: "about 0.93 GiB",
     },
 ];
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelDownloadEvent {
+    event: String,
+    key: Option<String>,
+    name: Option<String>,
+    repo: Option<String>,
+    message: Option<String>,
+}
 
 impl AppState {
     pub fn new(app: &AppHandle) -> Result<Self, FileSiftError> {
@@ -283,12 +306,11 @@ pub fn analyze_batch_impl(app: &AppHandle, batch_id: &str) -> Result<Vec<FileRec
         ));
     }
     let mut files = list_files(&conn, Some(batch_id))?;
-    let analyzer = analyzer_script_path(app);
 
     for file in &mut files {
         file.status = "Extracting".to_string();
         upsert_file(&conn, file)?;
-        match run_analyzer(app, &analyzer, file, &settings) {
+        match run_analyzer(app, file, &settings) {
             Ok(output) => {
                 file.status = if output.confidence >= settings.approve_threshold {
                     "Ready".to_string()
@@ -473,20 +495,41 @@ pub fn get_model_status_impl(app: &AppHandle) -> Result<ModelStatus, FileSiftErr
 }
 
 pub fn download_required_models_impl(app: &AppHandle) -> Result<ModelStatus, FileSiftError> {
-    let script = models_script_path(app);
-    if !script.exists() {
-        return Err(FileSiftError::Validation("Python model downloader script not found.".to_string()));
-    }
     let models_dir = models_dir(app)?;
     fs::create_dir_all(&models_dir)?;
-    let output = Command::new("python3")
-        .arg(script)
+    let mut command = sidecar_command(app, "models")?;
+    command
         .arg("--models-dir")
         .arg(&models_dir)
         .arg("--download")
-        .output()?;
+        .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    if let Some(stdout) = child.stdout.take() {
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event = parse_model_event(&line);
+            let _ = app.emit("model-download", event);
+        }
+    }
+    let output = child.wait_with_output()?;
     if !output.status.success() {
-        return Err(FileSiftError::Validation(String::from_utf8_lossy(&output.stderr).to_string()));
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let _ = app.emit(
+            "model-download",
+            ModelDownloadEvent {
+                event: "error".to_string(),
+                key: None,
+                name: None,
+                repo: None,
+                message: Some(stderr.clone()),
+            },
+        );
+        return Err(FileSiftError::Validation(stderr));
     }
     model_status(app)
 }
@@ -525,28 +568,6 @@ fn push_supported(path: PathBuf, seen: &mut HashSet<PathBuf>, files: &mut Vec<Pa
     }
 }
 
-fn analyzer_script_path(app: &AppHandle) -> PathBuf {
-    let dev_path = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("python")
-        .join("analyzer.py");
-    if dev_path.exists() {
-        return dev_path;
-    }
-    resource_script_path(app, "analyzer.py")
-}
-
-fn models_script_path(app: &AppHandle) -> PathBuf {
-    let dev_path = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("python")
-        .join("models.py");
-    if dev_path.exists() {
-        return dev_path;
-    }
-    resource_script_path(app, "models.py")
-}
-
 fn resource_script_path(app: &AppHandle, file_name: &str) -> PathBuf {
     let resource_dir = app.path().resource_dir().unwrap_or_else(|_| PathBuf::from("."));
     let nested = resource_dir.join("python").join(file_name);
@@ -554,6 +575,63 @@ fn resource_script_path(app: &AppHandle, file_name: &str) -> PathBuf {
         return nested;
     }
     resource_dir.join(file_name)
+}
+
+fn cli_script_path(app: &AppHandle) -> PathBuf {
+    let dev_path = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("python")
+        .join("cli.py");
+    if dev_path.exists() {
+        return dev_path;
+    }
+    resource_script_path(app, "cli.py")
+}
+
+fn sidecar_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let file_name = if cfg!(windows) {
+        "filesift-sidecar.exe"
+    } else {
+        "filesift-sidecar"
+    };
+    let path = dir.join(file_name);
+    path.exists().then_some(path)
+}
+
+fn sidecar_command(app: &AppHandle, subcommand: &str) -> Result<Command, FileSiftError> {
+    if let Some(path) = sidecar_path() {
+        let mut command = Command::new(path);
+        command.arg(subcommand);
+        return Ok(command);
+    }
+    let script = cli_script_path(app);
+    if !script.exists() {
+        return Err(FileSiftError::Validation("Python sidecar script not found.".to_string()));
+    }
+    let mut command = Command::new("python3");
+    command.arg(script).arg(subcommand);
+    Ok(command)
+}
+
+fn parse_model_event(line: &str) -> ModelDownloadEvent {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        return ModelDownloadEvent {
+            event: value.get("event").and_then(|item| item.as_str()).unwrap_or("message").to_string(),
+            key: value.get("key").and_then(|item| item.as_str()).map(ToString::to_string),
+            name: value.get("name").and_then(|item| item.as_str()).map(ToString::to_string),
+            repo: value.get("repo").and_then(|item| item.as_str()).map(ToString::to_string),
+            message: value.get("message").and_then(|item| item.as_str()).map(ToString::to_string),
+        };
+    }
+    ModelDownloadEvent {
+        event: "message".to_string(),
+        key: None,
+        name: None,
+        repo: None,
+        message: Some(line.to_string()),
+    }
 }
 
 fn models_dir(app: &AppHandle) -> Result<PathBuf, FileSiftError> {
@@ -566,11 +644,20 @@ fn model_status(app: &AppHandle) -> Result<ModelStatus, FileSiftError> {
         .iter()
         .map(|model| {
             let path = models_dir.join(model.key);
-            let downloaded = path.join(".filesift-model-ready").exists();
+            let marker = path.join(".filesift-model-ready");
+            let downloaded = fs::read_to_string(&marker)
+                .ok()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                .and_then(|value| value.get("revision").and_then(|revision| revision.as_str()).map(ToString::to_string))
+                .map(|revision| revision == model.revision)
+                .unwrap_or(false);
             ModelInfo {
                 key: model.key.to_string(),
                 name: model.name.to_string(),
                 repo: model.repo.to_string(),
+                revision: model.revision.to_string(),
+                license: model.license.to_string(),
+                size: model.size.to_string(),
                 downloaded,
                 path: path.to_string_lossy().to_string(),
             }
@@ -583,12 +670,9 @@ fn model_status(app: &AppHandle) -> Result<ModelStatus, FileSiftError> {
     })
 }
 
-fn run_analyzer(app: &AppHandle, path: &Path, file: &FileRecord, settings: &NamingSettings) -> Result<AnalyzerOutput, FileSiftError> {
-    if !path.exists() {
-        return Err(FileSiftError::Validation("Python analyzer script not found.".to_string()));
-    }
-    let output = Command::new("python3")
-        .arg(path)
+fn run_analyzer(app: &AppHandle, file: &FileRecord, settings: &NamingSettings) -> Result<AnalyzerOutput, FileSiftError> {
+    let mut command = sidecar_command(app, "analyze")?;
+    let output = command
         .arg("--file")
         .arg(&file.path)
         .arg("--settings")
