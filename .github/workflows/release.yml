@@ -1,6 +1,9 @@
 name: Release
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -43,16 +46,53 @@ jobs:
       - name: Install Python sidecar dependencies
         run: python -m pip install -r python/requirements.txt
 
+      - name: Test model downloader compatibility
+        run: python -m unittest discover -s python -p "test_*.py"
+
       - name: Verify pinned model sources
         run: python python/models.py --models-dir "$env:RUNNER_TEMP\filesift-model-smoke" --verify-remote
 
       - name: Build Python sidecar
         shell: pwsh
         run: |
-          python -m PyInstaller --onefile --name filesift-sidecar --collect-all transformers --collect-all torch --collect-all docling --collect-all huggingface_hub python/cli.py
+          python -m PyInstaller --clean --noconfirm --onefile --noconsole --name filesift-sidecar --collect-all transformers --collect-all torch --collect-all docling --collect-all huggingface_hub python/cli.py
           New-Item -ItemType Directory -Force src-tauri/binaries
           Copy-Item dist/filesift-sidecar.exe src-tauri/binaries/filesift-sidecar-x86_64-pc-windows-msvc.exe -Force
-          src-tauri/binaries/filesift-sidecar-x86_64-pc-windows-msvc.exe models --models-dir "$env:RUNNER_TEMP\filesift-model-smoke"
+
+      - name: Smoke-test hidden sidecar IPC
+        shell: pwsh
+        run: |
+          $executable = (Resolve-Path "src-tauri/binaries/filesift-sidecar-x86_64-pc-windows-msvc.exe").Path
+          $modelsDir = Join-Path $env:RUNNER_TEMP "filesift-model-smoke"
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $executable
+          $startInfo.UseShellExecute = $false
+          $startInfo.CreateNoWindow = $true
+          $startInfo.RedirectStandardOutput = $true
+          $startInfo.RedirectStandardError = $true
+          $startInfo.ArgumentList.Add("models")
+          $startInfo.ArgumentList.Add("--models-dir")
+          $startInfo.ArgumentList.Add($modelsDir)
+
+          $process = [System.Diagnostics.Process]::new()
+          $process.StartInfo = $startInfo
+          $process.Start() | Out-Null
+          $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+          $stderrTask = $process.StandardError.ReadToEndAsync()
+          $process.WaitForExit()
+          $stdout = $stdoutTask.Result
+          $stderr = $stderrTask.Result
+
+          Write-Host $stdout
+          if ($stderr) {
+            Write-Host $stderr
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "Sidecar exited with code $($process.ExitCode)."
+          }
+          if ($stdout -notmatch '"event":\s*"model-status"') {
+            throw "The hidden sidecar did not return model status over its stdout pipe."
+          }
 
       - name: Validate updater signing secrets
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
@@ -85,6 +125,6 @@ jobs:
           prerelease: false
 
       - name: Dry run complete
-        if: (github.event_name == 'workflow_dispatch' && inputs.dry_run) || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        if: (github.event_name == 'workflow_dispatch' && inputs.dry_run) || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request'
         run: |
-          echo "Dry-run completed: Python sidecar dependencies installed, model sources verified, and PyInstaller sidecar smoke-tested."
+          echo "Dry-run completed: downloader tests passed, model sources were verified, and the hidden PyInstaller sidecar returned status over IPC."
