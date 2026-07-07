@@ -46,7 +46,10 @@ jobs:
       - name: Install Python sidecar dependencies
         run: python -m pip install -r python/requirements.txt
 
-      - name: Test model downloader compatibility
+      - name: Verify GLiClass runtime imports
+        run: python -c "from gliclass import GLiClassModel, ZeroShotClassificationPipeline; from transformers import AutoTokenizer; print('GLiClass runtime ready')"
+
+      - name: Test local analysis and model downloads
         run: python -m unittest discover -s python -p "test_*.py"
 
       - name: Verify pinned model sources
@@ -55,7 +58,7 @@ jobs:
       - name: Build Python sidecar
         shell: pwsh
         run: |
-          python -m PyInstaller --clean --noconfirm --onefile --noconsole --name filesift-sidecar --collect-all transformers --collect-all torch --collect-all docling --collect-all huggingface_hub python/cli.py
+          python -m PyInstaller --clean --noconfirm --onefile --noconsole --name filesift-sidecar --collect-all transformers --collect-all torch --collect-all docling --collect-all huggingface_hub --collect-all gliclass --collect-all sklearn python/cli.py
           New-Item -ItemType Directory -Force src-tauri/binaries
           Copy-Item dist/filesift-sidecar.exe src-tauri/binaries/filesift-sidecar-x86_64-pc-windows-msvc.exe -Force
 
@@ -127,4 +130,4 @@ jobs:
       - name: Dry run complete
         if: (github.event_name == 'workflow_dispatch' && inputs.dry_run) || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request'
         run: |
-          echo "Dry-run completed: downloader tests passed, model sources were verified, and the hidden PyInstaller sidecar returned status over IPC."
+          echo "Dry-run completed: model runtimes and downloader tests passed, sources were verified, and the hidden PyInstaller sidecar returned status over IPC."

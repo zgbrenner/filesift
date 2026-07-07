@@ -178,29 +178,44 @@ def classify(text: str, labels: list[str]) -> tuple[str, float, list[str]]:
 
 
 def classify_with_gliclass(text: str, labels: list[str], models_dir: Path, warnings: list[str]) -> tuple[str, float, list[str]] | None:
-    if not text.strip() or not labels:
+    candidate_labels = [label for label in labels if label != "Unknown"]
+    if not text.strip() or not candidate_labels:
         return None
+
     model_path = models_dir / "gliclass"
     if not (model_path / ".filesift-model-ready").exists():
         return None
-    try:
-        from transformers import pipeline  # type: ignore
 
-        classifier = pipeline(
-            "zero-shot-classification",
-            model=str(model_path),
-            tokenizer=str(model_path),
-            trust_remote_code=True,
-            model_kwargs={"local_files_only": True},
-            tokenizer_kwargs={"local_files_only": True},
+    try:
+        from gliclass import GLiClassModel, ZeroShotClassificationPipeline  # type: ignore
+        from transformers import AutoTokenizer  # type: ignore
+
+        model = GLiClassModel.from_pretrained(str(model_path), local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path), local_files_only=True)
+        classifier = ZeroShotClassificationPipeline(
+            model,
+            tokenizer,
+            classification_type="single-label",
+            device="cpu",
+            progress_bar=False,
         )
-        result = classifier(text[:6000], candidate_labels=[label for label in labels if label != "Unknown"], multi_label=False)
-        scored = list(zip(result.get("labels", []), result.get("scores", []), strict=False))
-        if not scored:
+        batches = classifier(
+            text[:6000],
+            candidate_labels,
+            threshold=0.0,
+            batch_size=1,
+        )
+        predictions = batches[0] if batches else []
+        if not predictions:
             return None
-        label, score = scored[0]
-        confidence = max(0.35, min(float(score), 0.96))
-        return str(label), confidence, [f"GLiClass classified as {label}"]
+
+        best = max(predictions, key=lambda item: float(item.get("score", 0.0)))
+        label = str(best.get("label", "")).strip()
+        if not label or label not in candidate_labels:
+            return None
+
+        confidence = max(0.35, min(float(best.get("score", 0.0)), 0.96))
+        return label, confidence, [f"GLiClass classified as {label} ({confidence:.0%})"]
     except Exception as exc:  # noqa: BLE001 - model fallback is intentional
         warnings.append(f"GLiClass unavailable or failed: {exc}")
         return None

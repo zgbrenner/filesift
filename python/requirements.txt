@@ -1,10 +1,8 @@
 pydantic>=2.10
 python-dateutil>=2.9
 huggingface-hub>=0.24,<2
-transformers>=4.43
+transformers>=5,<6
 torch>=2.3
 docling>=2
+gliclass==0.1.19
 pyinstaller>=6.10,<7
-
-# Optional for future model-specific integrations:
-# gliclass
